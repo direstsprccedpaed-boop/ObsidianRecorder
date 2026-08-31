@@ -32,6 +32,7 @@ data class RecordingItem(
     val title: String,
     val dateLabel: String,
     val durationLabel: String,
+    val sizeLabel: String,
     val transcriptPreview: String,
     val createdAtMillis: Long
 )
@@ -52,7 +53,9 @@ data class UiState(
     val searchQuery: String = "",
     val isSearchActive: Boolean = false,
     val showThresholdPanel: Boolean = false,
-    val playingFilePath: String? = null
+    val playingFilePath: String? = null,
+    val isFinalizingStop: Boolean = false,
+    val selectedItemForActions: RecordingItem? = null
 )
 
 class RecorderViewModel(application: Application) : AndroidViewModel(application) {
@@ -84,6 +87,38 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     private fun observeService() {
         val svc = boundService ?: return
+
+        // C'est LA correction critique : on n'appelle refreshRecordings() ni
+        // on ne débloque la lecture qu'après avoir reçu stopCompleted != null,
+        // c'est-à-dire une fois que MediaMuxer a réellement écrit l'en-tête
+        // final (moov atom) du fichier .m4a. Avant, refreshRecordings() était
+        // appelé immédiatement après l'envoi de l'intent ACTION_STOP, sur un
+        // fichier encore incomplet -> lecture d'un fichier vide garantie.
+        viewModelScope.launch {
+            svc.stopCompleted.collect { finishedFile ->
+                if (finishedFile != null) {
+                    val transcriptSnapshot = _uiState.value.finalizedTranscript.trim()
+                    if (transcriptSnapshot.isNotBlank()) {
+                        val sidecar = File(finishedFile.parentFile, finishedFile.nameWithoutExtension + ".txt")
+                        try { sidecar.writeText(transcriptSnapshot) } catch (_: Exception) { }
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        isRecording = false,
+                        isFinalizingStop = false,
+                        lastRecordingFile = finishedFile,
+                        fabVisualState = FabVisualState.IDLE,
+                        finalizedTranscript = "",
+                        interimTranscript = ""
+                    )
+                    refreshRecordings()
+                    if (isBound) {
+                        try { getApplication<Application>().unbindService(connection) } catch (_: Exception) { }
+                        isBound = false
+                    }
+                }
+            }
+        }
+
         viewModelScope.launch {
             svc.engineReady.collect { ready ->
                 if (!ready) return@collect
@@ -135,38 +170,17 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun stopRecording(context: Context) {
-        val outputFile = boundService?.currentOutputFile
-        val transcriptSnapshot = _uiState.value.finalizedTranscript.trim()
-
+        // On ne fait plus refreshRecordings() ici : on se contente de signaler
+        // l'arrêt et d'attendre l'événement stopCompleted (voir observeService).
+        _uiState.value = _uiState.value.copy(isFinalizingStop = true, statusMessage = "Finalisation du fichier...")
         val intent = Intent(context, RecordingService::class.java).apply {
             action = RecordingService.ACTION_STOP
         }
         context.startService(intent)
-        if (isBound) {
-            context.unbindService(connection)
-            isBound = false
-        }
-
-        outputFile?.let { file ->
-            if (transcriptSnapshot.isNotBlank()) {
-                val sidecar = File(file.parentFile, file.nameWithoutExtension + ".txt")
-                try {
-                    sidecar.writeText(transcriptSnapshot)
-                } catch (_: Exception) { }
-            }
-        }
-
-        _uiState.value = _uiState.value.copy(
-            isRecording = false,
-            lastRecordingFile = outputFile,
-            fabVisualState = FabVisualState.IDLE,
-            finalizedTranscript = "",
-            interimTranscript = ""
-        )
-        refreshRecordings()
     }
 
     fun toggleRecording(context: Context) {
+        if (_uiState.value.isFinalizingStop) return
         if (_uiState.value.isRecording) {
             stopRecording(context)
         } else {
@@ -199,6 +213,33 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(searchQuery = query)
     }
 
+    fun openActionsFor(item: RecordingItem) {
+        _uiState.value = _uiState.value.copy(selectedItemForActions = item, lastRecordingFile = item.file)
+    }
+
+    fun closeActions() {
+        _uiState.value = _uiState.value.copy(selectedItemForActions = null)
+    }
+
+    fun exportTranscriptFor(item: RecordingItem, context: Context): File? {
+        val sidecar = File(item.file.parentFile, item.file.nameWithoutExtension + ".txt")
+        if (!sidecar.exists()) {
+            _uiState.value = _uiState.value.copy(statusMessage = "Aucune transcription associée à ce fichier")
+            return null
+        }
+        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
+        val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm", Locale.getDefault()).format(Date())
+        val outFile = File(dir, "${timestamp}_Transcript.txt")
+        try {
+            outFile.writeText(sidecar.readText())
+            _uiState.value = _uiState.value.copy(statusMessage = "Transcript exporté : ${outFile.name}")
+            return outFile
+        } catch (_: Exception) {
+            _uiState.value = _uiState.value.copy(statusMessage = "Erreur lors de l'export")
+            return null
+        }
+    }
+
     fun exportTranscript(context: Context): File? {
         val text = (_uiState.value.finalizedTranscript + " " + _uiState.value.interimTranscript).trim()
         if (text.isBlank()) return null
@@ -210,15 +251,31 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         return file
     }
 
-    fun splitRecording(targetSizeBytes: Long) {
-        val file = _uiState.value.lastRecordingFile ?: return
+    fun splitRecording(item: RecordingItem, targetSizeBytes: Long) {
         viewModelScope.launch(Dispatchers.IO) {
-            val outputDir = file.parentFile ?: return@launch
-            val parts = AudioSplitter.splitBySize(file, targetSizeBytes, outputDir)
-            _uiState.value = _uiState.value.copy(
-                splitOutputFiles = parts,
-                statusMessage = "${parts.size} fichiers générés"
-            )
+            val outputDir = item.file.parentFile ?: return@launch
+            try {
+                val parts = AudioSplitter.splitBySize(item.file, targetSizeBytes, outputDir)
+                _uiState.value = _uiState.value.copy(
+                    splitOutputFiles = parts,
+                    statusMessage = "${parts.size} fichiers générés"
+                )
+                refreshRecordings()
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(statusMessage = "Échec de la découpe : ${e.message}")
+            }
+        }
+    }
+
+    fun deleteRecording(item: RecordingItem) {
+        try {
+            if (item.file.exists()) item.file.delete()
+            val sidecar = File(item.file.parentFile, item.file.nameWithoutExtension + ".txt")
+            if (sidecar.exists()) sidecar.delete()
+            _uiState.value = _uiState.value.copy(statusMessage = "Enregistrement supprimé", selectedItemForActions = null)
+            refreshRecordings()
+        } catch (e: Exception) {
+            _uiState.value = _uiState.value.copy(statusMessage = "Suppression impossible : ${e.message}")
         }
     }
 
@@ -239,37 +296,42 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         val displayDateFormat = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
         val displayTitleFormat = SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault())
 
-        return files.sortedByDescending { it.lastModified() }.map { file ->
-            val rawTimestamp = file.nameWithoutExtension.removePrefix("REC_")
-            val parsedDate: Date = try {
-                filenameDateFormat.parse(rawTimestamp) ?: Date(file.lastModified())
-            } catch (_: Exception) {
-                Date(file.lastModified())
-            }
-
-            val title = "Enregistreur sonore \u2013 ${displayTitleFormat.format(parsedDate)}"
-            val dateLabel = displayDateFormat.format(parsedDate)
-            val durationLabel = extractDurationLabel(file)
-            val sidecar = File(file.parentFile, file.nameWithoutExtension + ".txt")
-            val transcriptPreview = if (sidecar.exists()) {
-                try {
-                    sidecar.readText().trim().replace("\n", " ").take(120)
+        return files
+            .filter { it.length() > 0L }
+            .sortedByDescending { it.lastModified() }
+            .map { file ->
+                val rawTimestamp = file.nameWithoutExtension.removePrefix("REC_")
+                val parsedDate: Date = try {
+                    filenameDateFormat.parse(rawTimestamp) ?: Date(file.lastModified())
                 } catch (_: Exception) {
+                    Date(file.lastModified())
+                }
+
+                val title = "Enregistreur sonore \u2013 ${displayTitleFormat.format(parsedDate)}"
+                val dateLabel = displayDateFormat.format(parsedDate)
+                val durationLabel = extractDurationLabel(file)
+                val sizeLabel = formatFileSize(file.length())
+                val sidecar = File(file.parentFile, file.nameWithoutExtension + ".txt")
+                val transcriptPreview = if (sidecar.exists()) {
+                    try {
+                        sidecar.readText().trim().replace("\n", " ").take(120)
+                    } catch (_: Exception) {
+                        "Aucune transcription disponible"
+                    }
+                } else {
                     "Aucune transcription disponible"
                 }
-            } else {
-                "Aucune transcription disponible"
-            }
 
-            RecordingItem(
-                file = file,
-                title = title,
-                dateLabel = dateLabel,
-                durationLabel = durationLabel,
-                transcriptPreview = transcriptPreview.ifBlank { "Aucune transcription disponible" },
-                createdAtMillis = parsedDate.time
-            )
-        }
+                RecordingItem(
+                    file = file,
+                    title = title,
+                    dateLabel = dateLabel,
+                    durationLabel = durationLabel,
+                    sizeLabel = sizeLabel,
+                    transcriptPreview = transcriptPreview.ifBlank { "Aucune transcription disponible" },
+                    createdAtMillis = parsedDate.time
+                )
+            }
     }
 
     private fun extractDurationLabel(file: File): String {
@@ -294,7 +356,21 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
     }
 
+    private fun formatFileSize(bytes: Long): String {
+        val mb = bytes / (1024.0 * 1024.0)
+        return if (mb >= 1.0) {
+            String.format(Locale.getDefault(), "%.1f Mo", mb)
+        } else {
+            val kb = bytes / 1024.0
+            String.format(Locale.getDefault(), "%.0f Ko", kb)
+        }
+    }
+
     fun togglePlayback(item: RecordingItem) {
+        if (item.file.length() == 0L) {
+            _uiState.value = _uiState.value.copy(statusMessage = "Fichier vide ou corrompu")
+            return
+        }
         val currentlyPlaying = _uiState.value.playingFilePath
         if (currentlyPlaying == item.file.absolutePath) {
             stopPlayback()
@@ -309,14 +385,23 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                     it.release()
                     mediaPlayer = null
                 }
+                setOnErrorListener { mp, _, _ ->
+                    _uiState.value = _uiState.value.copy(
+                        statusMessage = "Erreur de lecture : fichier illisible",
+                        playingFilePath = null
+                    )
+                    mp.release()
+                    mediaPlayer = null
+                    true
+                }
                 prepare()
                 start()
             }
             mediaPlayer = player
             _uiState.value = _uiState.value.copy(playingFilePath = item.file.absolutePath)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             _uiState.value = _uiState.value.copy(
-                statusMessage = "Impossible de lire ce fichier",
+                statusMessage = "Impossible de lire ce fichier : ${e.message}",
                 playingFilePath = null
             )
         }
