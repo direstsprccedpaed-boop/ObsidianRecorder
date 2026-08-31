@@ -20,10 +20,16 @@ Application Android d'enregistrement audio professionnel avec :
 
 ## Build local
 
+Si vous avez Gradle installé localement (ou Android Studio), régénérez
+le wrapper une seule fois avant de builder :
+
 ```bash
+gradle wrapper --gradle-version 8.9 --distribution-type bin
 ./gradlew assembleDebug
 ```
 
+Alternativement, ouvrez simplement le dossier dans Android Studio : il
+régénère le wrapper automatiquement au premier import du projet.
 L'APK est généré dans `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Structure du projet
