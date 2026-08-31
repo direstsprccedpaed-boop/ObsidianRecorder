@@ -11,7 +11,9 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Binder
 import android.os.Environment
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.spasfonk.obsidianrecorder.MainActivity
@@ -37,14 +39,26 @@ class RecordingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     var audioEngine: AudioRecordEngine? = null
         private set
     lateinit var transcriptionManager: TranscriptionManager
     var currentOutputFile: File? = null
+        private set
 
     private val _engineReady = MutableStateFlow(false)
     val engineReady: StateFlow<Boolean> = _engineReady.asStateFlow()
+
+    // Emet le fichier finalisé uniquement une fois que MediaMuxer a réellement
+    // écrit l'en-tête (moov atom) sur disque via stop(). Tant que cette valeur
+    // reste null, le fichier .m4a est incomplet et NE DOIT PAS être lu, scanné
+    // ou exposé dans la liste : c'est la cause du "fichier vide à la lecture".
+    private val _stopCompleted = MutableStateFlow<File?>(null)
+    val stopCompleted: StateFlow<File?> = _stopCompleted.asStateFlow()
+
+    @Volatile
+    private var isStopping = false
 
     inner class LocalBinder : Binder() {
         fun getService(): RecordingService = this@RecordingService
@@ -70,6 +84,11 @@ class RecordingService : Service() {
     }
 
     private fun beginRecording() {
+        if (audioEngine != null) return
+
+        _stopCompleted.value = null
+        isStopping = false
+
         startForeground(NOTIFICATION_ID, buildNotification("Enregistrement en cours"))
         acquireWakeLock()
         requestAudioFocus()
@@ -87,14 +106,35 @@ class RecordingService : Service() {
     }
 
     private fun endRecording() {
-        audioEngine?.stop()
+        if (isStopping) return
+        val engine = audioEngine ?: return
+        val finishedFile = currentOutputFile
+        isStopping = true
+
         transcriptionManager.stop()
-        _engineReady.value = false
-        audioEngine = null
-        releaseWakeLock()
-        abandonAudioFocus()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+
+        // audioEngine.stop() est bloquant : il attend la fin du thread de capture
+        // puis le drainage complet de l'encodeur (jusqu'à ~2s). Cette opération ne
+        // doit JAMAIS tourner sur le thread principal du Service (risque d'ANR et
+        // retard de finalisation). On l'exécute sur un thread dédié, puis on
+        // revient sur le thread principal pour terminer proprement le cycle de vie
+        // du service et notifier la finalisation réelle du fichier.
+        Thread {
+            try {
+                engine.stop()
+            } catch (_: Exception) { }
+
+            mainHandler.post {
+                _engineReady.value = false
+                audioEngine = null
+                releaseWakeLock()
+                abandonAudioFocus()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                isStopping = false
+                _stopCompleted.value = finishedFile
+                stopSelf()
+            }
+        }.start()
     }
 
     private fun requestAudioFocus() {
