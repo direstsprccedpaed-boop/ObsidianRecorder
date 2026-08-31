@@ -7,11 +7,11 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -20,13 +20,13 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import com.spasfonk.obsidianrecorder.ui.FabVisualState
@@ -36,6 +36,7 @@ private val ListeningColor = Color(0xFFF59E0B)
 private val RecordingColor = Color(0xFF10B981)
 private val IdleDotColor = Color(0xFFEF4444)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun RecordingTriggerFab(
     visualState: FabVisualState,
@@ -75,13 +76,13 @@ fun RecordingTriggerFab(
     )
 
     Box(
-        modifier = modifier.size(72.dp),
+        modifier = modifier.size(80.dp),
         contentAlignment = Alignment.Center
     ) {
         if (visualState == FabVisualState.LISTENING) {
             Box(
                 modifier = Modifier
-                    .size(72.dp)
+                    .size(80.dp)
                     .background(ListeningColor.copy(alpha = glowAlpha), CircleShape)
             )
         }
@@ -96,27 +97,21 @@ fun RecordingTriggerFab(
                 }
                 .shadow(elevation = 10.dp, shape = CircleShape, clip = false)
                 .background(fabColor, CircleShape)
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onTap()
-                        },
-                        onLongPress = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            onLongPressOrSwipeUp()
-                        }
-                    )
-                }
-                .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        if (dragAmount.y < -12f) {
-                            onLongPressOrSwipeUp()
-                        }
-                        change.consume()
+                // Un seul détecteur de gestes combiné (tap + appui long) au lieu
+                // de deux pointerInput concurrents : élimine le conflit qui
+                // rendait le panneau de seuil inaccessible via appui long.
+                .combinedClickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onTap()
+                    },
+                    onLongClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onLongPressOrSwipeUp()
                     }
-                }
-                .padding(0.dp),
+                ),
             contentAlignment = Alignment.Center
         ) {
             when (visualState) {

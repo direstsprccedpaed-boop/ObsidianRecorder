@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Card
@@ -40,6 +41,7 @@ fun RecordingCard(
     item: RecordingItem,
     isPlaying: Boolean,
     onTogglePlayback: () -> Unit,
+    onOpenActions: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -64,11 +66,19 @@ fun RecordingCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = item.dateLabel,
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    Row {
+                        Text(
+                            text = item.dateLabel,
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "\u00b7 ${item.sizeLabel}",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
 
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -91,6 +101,13 @@ fun RecordingCard(
                             imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                             contentDescription = if (isPlaying) "Pause" else "Lire",
                             tint = if (isPlaying) androidx.compose.ui.graphics.Color.White else ElectricBlue
+                        )
+                    }
+                    IconButton(onClick = onOpenActions, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            imageVector = Icons.Filled.MoreVert,
+                            contentDescription = "Plus d'actions",
+                            tint = TextSecondary
                         )
                     }
                 }
