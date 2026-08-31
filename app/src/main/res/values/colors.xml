@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="obsidian_background">#0B0E11</color>
+    <color name="obsidian_surface">#151A1F</color>
+    <color name="obsidian_border">#2A2F36</color>
+    <color name="emerald_accent">#34D399</color>
+    <color name="electric_blue">#3B82F6</color>
+</resources>
